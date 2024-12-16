@@ -1,0 +1,111 @@
+import os
+import time
+import paramiko  # For SSH and SCP
+from picamera2 import Picamera2
+import RPi.GPIO as GPIO
+
+# === CONFIGURATION ===
+PHOTO_FOLDER = "/home/pi/photos/"
+PROCESSED_FOLDER = "/home/pi/processed/"
+REMOTE_PC = "192.168.1.100"  # IP address of your PC
+REMOTE_USER = "user"  # Your PC's username
+REMOTE_PASS = "password"  # Your PC's password
+REMOTE_PHOTO_FOLDER = "/home/user/photos/"
+REMOTE_OUTPUT_FOLDER = "/home/user/processed/"
+MESHROOM_COMMAND = "meshroom_photogrammetry --input {input} --output {output}"
+
+TURN_PIN = 17  # GPIO pin controlling the turntable
+STEP_DELAY = 0.5  # Delay between steps
+STEPS_PER_ROTATION = 24  # Number of steps (photos) per rotation
+ROTATION_ANGLE = 360 / STEPS_PER_ROTATION
+
+# === SETUP ===
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(TURN_PIN, GPIO.OUT)
+camera = Picamera2()
+
+def capture_image(step):
+    """Capture an image using the Raspberry Pi camera."""
+    filename = f"{PHOTO_FOLDER}image_{step:02d}.jpg"
+    camera.start_and_capture_file(filename)
+    print(f"Captured: {filename}")
+    time.sleep(1)  # Pause to stabilize
+    return filename
+
+def rotate_turntable():
+    """Rotate the turntable."""
+    GPIO.output(TURN_PIN, GPIO.HIGH)
+    time.sleep(STEP_DELAY)
+    GPIO.output(TURN_PIN, GPIO.LOW)
+
+def transfer_files():
+    """Transfer captured images to the remote PC."""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(REMOTE_PC, username=REMOTE_USER, password=REMOTE_PASS)
+
+    scp = ssh.open_sftp()
+    for file in os.listdir(PHOTO_FOLDER):
+        local_path = os.path.join(PHOTO_FOLDER, file)
+        remote_path = os.path.join(REMOTE_PHOTO_FOLDER, file)
+        scp.put(local_path, remote_path)
+        print(f"Transferred: {local_path} to {remote_path}")
+    scp.close()
+    ssh.close()
+
+def process_photos():
+    """Trigger Meshroom photogrammetry process on the remote PC."""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(REMOTE_PC, username=REMOTE_USER, password=REMOTE_PASS)
+
+    command = MESHROOM_COMMAND.format(input=REMOTE_PHOTO_FOLDER, output=REMOTE_OUTPUT_FOLDER)
+    stdin, stdout, stderr = ssh.exec_command(command)
+    print("Photogrammetry started...")
+    print(stdout.read().decode())
+    print(stderr.read().decode())
+    ssh.close()
+
+def retrieve_obj():
+    """Retrieve the final OBJ file from the remote PC."""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(REMOTE_PC, username=REMOTE_USER, password=REMOTE_PASS)
+
+    scp = ssh.open_sftp()
+    remote_file = os.path.join(REMOTE_OUTPUT_FOLDER, "model.obj")
+    local_file = os.path.join(PROCESSED_FOLDER, "model.obj")
+    scp.get(remote_file, local_file)
+    print(f"Retrieved OBJ file: {remote_file} to {local_file}")
+    scp.close()
+    ssh.close()
+
+# === MAIN WORKFLOW ===
+def main():
+    if not os.path.exists(PHOTO_FOLDER):
+        os.makedirs(PHOTO_FOLDER)
+    if not os.path.exists(PROCESSED_FOLDER):
+        os.makedirs(PROCESSED_FOLDER)
+
+    # Capture images
+    print("Starting image capture...")
+    for step in range(STEPS_PER_ROTATION):
+        capture_image(step)
+        rotate_turntable()
+
+    # Transfer files to processing PC
+    print("Transferring files to processing PC...")
+    transfer_files()
+
+    # Start photogrammetry process
+    print("Starting photogrammetry process...")
+    process_photos()
+
+    # Retrieve the OBJ file
+    print("Retrieving OBJ file...")
+    retrieve_obj()
+
+    print("Process complete! OBJ file saved locally.")
+
+if _name_ == "_main_":
+    main()
